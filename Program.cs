@@ -70,7 +70,7 @@ static async Task<string> GetGptResponseAsync(string prompt, string apiKey, stri
 
     var requestData = new
     {
-        modelUri = $"gpt://{folderId}/yandexgpt", // или yandexgpt, в зависимости от модели
+        modelUri = $"gpt://{folderId}/yandexgpt", // что делает эта строка что значит yandexgpt что еще есть кроме yandexgpt
         completionOptions = new
         {
             stream = false,

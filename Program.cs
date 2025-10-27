@@ -8,7 +8,7 @@ using Telegram.Bot.Exceptions;
 using Telegram.Bot.Types;
 using Telegram.Bot.Types.Enums;
 using Telegram.Bot.Types.ReplyMarkups;
-
+using System.Net;
 
 // Загружаем конфигурацию
 var configuration = new ConfigurationBuilder()
@@ -61,65 +61,67 @@ var me = await botClient.GetMe();
 Console.WriteLine($"Бот @{me.Username} запущен и готов к работе!");
 Console.ReadLine(); // Не даем приложению сразу завершиться.
 
-//// Асинхронная функция для обработки входящих обновлений (сообщений).
-//async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
-//{
-//    // Проверяем, является ли обновление сообщением и содержит ли оно текст.
-//    // Это важно, потому что обновление может быть, например, колбэком от инлайн-кнопки.
-//    if (update.Type != UpdateType.Message)
-//        return;
-//    if (update.Message!.Type != MessageType.Text)
-//        return;
 
-//    var chatId = update.Message.Chat.Id; // Уникальный идентификатор чата с пользователем.
-//    var messageText = update.Message.Text; // Текст сообщения от пользователя.
 
-//    Console.WriteLine($"Получено сообщение '{messageText}' в чате {chatId}.");
+//////////////\функция для отправки запроса в Yandex GPT
+static async Task<string> GetGptResponseAsync(string prompt, string apiKey, string folderId, CancellationToken cancellationToken)
+{
+    using var httpClient = new HttpClient();
 
-//    // Обрабатываем команду /start
-//    if (messageText == "/start")
-//    {
-//        // Создаем клавиатуру с одной кнопкой.
-//        // ReplyKeyboardMarkup - это кастомная клавиатура, которая появляется вместо стандартной.
-//        var replyKeyboard = new ReplyKeyboardMarkup(
-//            new[]
-//            {
-//                // Первый ряд кнопок. Можно добавить несколько кнопок в один массив.
-//                new KeyboardButton[] { "ми меня!" },
-//            }
-//        )
-//        {
-//            ResizeKeyboard = true // Клавиатура подстроится под размер кнопок (будет компактнее).
-//        };
+    var requestData = new
+    {
+        modelUri = $"gpt://{folderId}/yandexgpt", // или yandexgpt, в зависимости от модели
+        completionOptions = new
+        {
+            stream = false,
+            temperature = 0.3,
+            maxTokens = "2000"
+        },
+        messages = new[]
+        {
+            new
+            {
+                role = "user",
+                text = prompt
+            }
+        }
+    };
 
-//        // Отправляем сообщение с текстом и нашей клавиатурой.
-//        Message sentMessage = await botClient.SendMessage(
-//            chatId: chatId,
-//            text: "Добро пожаловать! Нажмите на кнопку ниже.",
-//            replyMarkup: replyKeyboard, // Прикрепляем клавиатуру к сообщению.
-//            cancellationToken: cancellationToken
-//        );
-//    }
-//    // Обрабатываем нажатие на нашу кастомную кнопку.
-//    else if (messageText == "ми меня!")
-//    {
-//        // Отправляем ответное сообщение "Привет!".
-//        Message sentMessage = await botClient.SendMessage(
-//            chatId: chatId,
-//            text: "Привет!",
-//            cancellationToken: cancellationToken
-//        );
-//    }
-//    // Обрабатываем любое другое текстовое сообщение.
-//    else
-//    {
-//        Message sentMessage = await botClient.SendMessage(
-//            chatId: chatId,
-//            text: "Пожалуйста, используйте кнопки.",
-//            cancellationToken: cancellationToken
-//        );
-//    }
-//}
+    //var requestData = new
+    //{
+    //    modelUri = $"art://{folderId}/yandexart", // или другой ID модели
+    //    generationOptions = new
+    //    {
+    //        mimeType = "image/jpeg", // или png
+    //        seed = 42 // для воспроизводимости
+    //    },
+    //    prompt = prompt // текст, по которому рисуется изображение
+    //};
+
+    var json = System.Text.Json.JsonSerializer.Serialize(requestData);
+
+    var content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+
+    httpClient.DefaultRequestHeaders.Add("Authorization", $"Api-Key {apiKey}");
+
+    var response = await httpClient.PostAsync("https://llm.api.cloud.yandex.net/foundationModels/v1/completion", content, cancellationToken);
+    //var response = await httpClient.PostAsync("https://llm.api.cloud.yandex.net/imageGeneration/v1/imageGenerationAsync", content, cancellationToken);
+    var responseContent = await response.Content.ReadAsStringAsync(cancellationToken);
+
+    if (response.IsSuccessStatusCode)
+    {
+        using var doc = System.Text.Json.JsonDocument.Parse(responseContent);
+        var result = doc.RootElement.GetProperty("result");
+        var alternatives = result.GetProperty("alternatives");
+        var text = alternatives[0].GetProperty("message").GetProperty("text").GetString();
+
+        return text ?? "Не удалось получить ответ.";
+    }
+    else
+    {
+        return $"Ошибка: {responseContent}";
+    }
+}
 
 async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, CancellationToken cancellationToken)
 {
@@ -128,26 +130,50 @@ async Task HandleUpdateAsync(ITelegramBotClient botClient, Update update, Cancel
     {
         var chatId = message.Chat.Id;
 
-        if (messageText == "/start" || messageText == "/menu")
+        // Проверяем, не является ли это командой
+        if (messageText.StartsWith("/"))
         {
-            // Получаем имя пользователя: сначала пробуем Username, если нет — FirstName
-            var userName = message.From.FirstName;
-
-            // Создаем INLINE-кнопки (под сообщением)
-            var inlineKeyboard = new InlineKeyboardMarkup(new[]
+            // Обработка команд (/start, /menu и т.д.)
+            if (messageText == "/start" || messageText == "/menu")
             {
+                var userName = message.From.FirstName ?? "Пользователь";
+
+                var inlineKeyboard = new InlineKeyboardMarkup(new[]
+                {
                 new[]
                 {
-                    InlineKeyboardButton.WithCallbackData("🎯 Жми епта!", "hello_button"),
+                    InlineKeyboardButton.WithCallbackData("🎯 Нажми меня!", "hello_button"),
                     InlineKeyboardButton.WithCallbackData("ℹ️ Помощь", "help_button")
                 }
             });
 
+                await botClient.SendMessage(
+                    chatId: chatId,
+                    text: $"Добро пожаловать, {userName}! Используйте кнопки ниже:\n\n⚠️ Эти кнопки НЕ исчезнут!",
+                    replyMarkup: inlineKeyboard,
+                    cancellationToken: cancellationToken
+                );
+            }
+        }
+        else
+        {
+            // Это обычное сообщение — отправляем в GPT
+            var apiKey = configuration["YandexGptConfiguration:ApiKey"] ?? throw new InvalidOperationException("Yandex API Key not found!");
+            var folderId = configuration["YandexGptConfiguration:FolderId"] ?? throw new InvalidOperationException("Yandex Folder ID not found!");
+
             await botClient.SendMessage(
                 chatId: chatId,
-                text: $"Добро пожаловать, {userName}! Используйте кнопки ниже:\n\n⚠️ Эти кнопки НЕ исчезнут!",
-                replyMarkup: inlineKeyboard,
-                cancellationToken: cancellationToken);
+                text: "Обрабатываю запрос...",
+                cancellationToken: cancellationToken
+            );
+
+            var gptResponse = await GetGptResponseAsync(messageText, apiKey, folderId, cancellationToken);
+
+            await botClient.SendMessage(
+                chatId: chatId,
+                text: gptResponse,
+                cancellationToken: cancellationToken
+            );
         }
     }
 
